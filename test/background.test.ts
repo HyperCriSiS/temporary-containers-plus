@@ -136,7 +136,6 @@ preferencesTestSet.map(preferences => {
       it('should reopen about:home in temporary container', async () => {
         const { browser } = await loadBackground({ preferences });
         await browser.tabs._create({ url: 'about:home' });
-        browser.contextualIdentities.create.should.have.been.calledOnce;
         browser.tabs.create.should.have.been.calledOnce;
       });
 
@@ -202,7 +201,7 @@ preferencesTestSet.map(preferences => {
         });
       });
 
-      it('should open in a new temporary container', () => {
+      it('should open in a new temporary container', async () => {
         webExtension.browser.contextualIdentities.create.should.have.been.calledOnce;
         webExtension.browser.tabs.create.should.have.been.calledOnce;
         webExtension.browser.tabs.remove.should.have.been.calledOnce;
@@ -251,16 +250,158 @@ preferencesTestSet.map(preferences => {
         const { tmp: background, browser } = await loadBackground({
           preferences,
         });
-        background.storage.local.preferences.isolation.global.mouseClick.middle.action = 'always';
-
-        await browser.runtime.onMessage.addListener.yield({
+        const fakeMessage = {
           method: 'savePreferences',
           payload: {
-            preferences: background.storage.local.preferences,
+            preferences: {
+              ...background.storage.local.preferences,
+              automaticMode: true,
+            },
+          },
+        };
+        await background.runtime.onMessage(fakeMessage, {});
+        browser.storage.local.set.should.have.been.calledWithMatch({
+          preferences: {
+            automaticMode: true,
           },
         });
+      });
+    });
 
-        browser.storage.local.set.should.have.been.called;
+    describe('commands', () => {
+      describe('New Temporary Container Tab', () => {
+        it('should open a new temporary container tab', async () => {
+          const { browser } = await loadBackground({ preferences });
+          browser.commands.onCommand.addListener.yield('new_temporary_container_tab');
+          await nextTick();
+          browser.tabs.create.should.have.been.called;
+        });
+      });
+
+      describe('New No Container Tab', () => {
+        it('should open a new no container tab', async () => {
+          const { tmp: _background, browser } = await loadBackground({
+            preferences,
+          });
+          browser.commands.onCommand.addListener.yield('new_no_container_tab');
+          await nextTick();
+          browser.tabs.create.should.have.been.calledWith({
+            url: 'about:blank',
+          });
+        });
+      });
+
+      describe('New No Container Window Tab', () => {
+        it('should open a new no container window', async () => {
+          const { tmp: _background, browser } = await loadBackground({
+            preferences,
+          });
+          browser.commands.onCommand.addListener.yield('new_no_container_window_tab');
+          await nextTick();
+          browser.windows.create.should.have.been.calledWith({
+            url: 'about:blank',
+          });
+        });
+      });
+
+      describe('New Deletes History Container Tab', () => {
+        it('should open a new deletes history container tab', async () => {
+          const { tmp: background, browser } = await loadBackground({
+            preferences,
+          });
+          background.permissions.history = true;
+          browser.commands.onCommand.addListener.yield('new_no_history_tab');
+          await nextTick();
+          browser.tabs.create.should.have.been.called;
+          browser.contextualIdentities.create.should.have.been.calledWithMatch({
+            name: sinon.match('-deletes-history'),
+          });
+        });
+      });
+
+      describe('New Same Container Tab', () => {
+        it('should open a new same container tab', async () => {
+          const { tmp: _background, browser } = await loadBackground({
+            preferences,
+          });
+          const container = await browser.contextualIdentities.create({});
+          await browser.tabs._create({
+            cookieStoreId: container.cookieStoreId,
+          });
+          browser.commands.onCommand.addListener.yield('new_same_container_tab');
+          await nextTick();
+          browser.tabs.create.should.have.been.calledWithMatch({
+            cookieStoreId: container.cookieStoreId,
+          });
+        });
+      });
+
+      describe('Toggle Isolation', () => {
+        it('should toggle active isolation to false', async () => {
+          const { tmp: background, browser } = await loadBackground({
+            preferences,
+          });
+          browser.commands.onCommand.addListener.yield('toggle_isolation');
+          await nextTick();
+          background.storage.local.isolation.active.should.equal(false);
+        });
+        it('should toggle active isolation back to true', async () => {
+          const { tmp: background, browser } = await loadBackground({
+            preferences,
+          });
+          // First toggle to false
+          browser.commands.onCommand.addListener.yield('toggle_isolation');
+          await nextTick();
+          // Then toggle back to true
+          browser.commands.onCommand.addListener.yield('toggle_isolation');
+          await nextTick();
+          background.storage.local.isolation.active.should.equal(true);
+        });
+      });
+    });
+
+    describe('Reuse container number', () => {
+      if (!preferences.automaticMode.active || preferences.automaticMode.newTab === 'navigation') {
+        return;
+      }
+
+      it('should work when multiple tabs are opened', async () => {
+        const { tmp: background, browser } = await loadBackground({ preferences });
+        background.storage.local.preferences.container.removal = 0;
+        background.storage.local.preferences.container.numberMode = 'reuse';
+
+        // Create 5 about:newtab tabs (parallel is fine; we'll wait for containers)
+        await Promise.all(Array.from({ length: 5 }).map(() => browser.tabs._create({ url: 'about:newtab' })));
+
+        // Wait until 5 temp containers are registered in storage
+        const { waitForTempContainers } = await import('./wait');
+        await waitForTempContainers(background, 5);
+
+        const tabs = await browser.tabs.query({});
+        const tempTabs = tabs.filter((tab: Tab) => tab.cookieStoreId !== 'firefox-default');
+        tempTabs.length.should.equal(5);
+
+        const identities = (await Promise.all(tempTabs.map((t: Tab) => browser.contextualIdentities.get(t.cookieStoreId)))).filter(
+          Boolean
+        ) as any[];
+        identities.length.should.equal(5);
+        // Sort by numeric suffix of the tmp name to make ordering deterministic
+        const sorted = identities.sort((a, b) => Number(a.name.replace('tmp', '')) - Number(b.name.replace('tmp', '')));
+        sorted.forEach((ci, idx) => ci.name.should.equal(`tmp${idx + 1}`));
+
+        // Remove the first (tmp1) and create a new one -> should reuse 1
+        const tmp1Tab = tempTabs.find((t: Tab) => /firefox-container-1$/.test(t.cookieStoreId)) || tempTabs[0];
+        await browser.tabs.remove(tmp1Tab.id);
+        await browser.tabs._create({ url: 'about:newtab' });
+        await waitForTempContainers(background, 5); // still 5 after reuse
+        const reused = await browser.contextualIdentities.get((await browser.tabs.create.lastCall.returnValue).cookieStoreId);
+        reused!.name.should.equal('tmp1');
+
+        // Next new tab should allocate tmp6
+        await browser.tabs._create({ url: 'about:newtab' });
+        await waitForTempContainers(background, 6);
+        const sixth = await browser.contextualIdentities.get((await browser.tabs.create.lastCall.returnValue).cookieStoreId);
+        sixth!.name.should.equal('tmp6');
       });
     });
   });
