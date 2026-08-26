@@ -12,7 +12,7 @@ export class EventListeners {
   }> = [];
   private defaultTimeout = 30; // seconds
   private listeners: Array<{
-    listener: () => void;
+    listener: (...listenerArgs: any[]) => any;
     api: any;
   }> = [];
 
@@ -27,7 +27,10 @@ export class EventListeners {
     this.debug('[event-listeners] registering');
 
     browser.webRequest.onBeforeRequest.addListener(
-      this.wrap(browser.webRequest.onBeforeRequest, this.background.request, 'webRequestOnBeforeRequest', { timeout: 5 }),
+      this.wrap(browser.webRequest.onBeforeRequest, this.background.request, 'webRequestOnBeforeRequest', {
+        timeout: 5,
+        failOpenWhileInitializing: true,
+      }),
       { urls: ['<all_urls>'], types: ['main_frame'] },
       ['blocking']
     );
@@ -61,7 +64,7 @@ export class EventListeners {
     browser.management.onDisabled.addListener(this.wrap(browser.management.onDisabled, this.background.management, 'disable'));
     browser.management.onUninstalled.addListener(this.wrap(browser.management.onUninstalled, this.background.management, 'disable'));
     browser.management.onEnabled.addListener(this.wrap(browser.management.onEnabled, this.background.management, 'enable'));
-    browser.management.onInstalled.addListener(this.wrap(browser.management.onUninstalled, this.background.management, 'enable'));
+    browser.management.onInstalled.addListener(this.wrap(browser.management.onInstalled, this.background.management, 'enable'));
     browser.commands.onCommand.addListener(this.wrap(browser.commands.onCommand, this.background.commands, 'onCommand'));
     browser.tabs.onActivated.addListener(this.wrap(browser.tabs.onActivated, this.background.tabs, 'onActivated'));
     browser.tabs.onCreated.addListener(this.wrap(browser.tabs.onCreated, this.background.tabs, 'onCreated'));
@@ -84,18 +87,27 @@ export class EventListeners {
     api: any,
     context: any,
     target: any,
-    options: { timeout: number } = { timeout: this.defaultTimeout }
-  ): (...listenerArgs: any) => Promise<any> {
+    options: { timeout: number; failOpenWhileInitializing?: boolean } = { timeout: this.defaultTimeout }
+  ): (...listenerArgs: any[]) => any {
     const tmpInitializedPromise = this.createTmpInitializedPromise(options);
 
-    const listener = async (...listenerArgs: any): Promise<any> => {
+    const listener = (...listenerArgs: any[]): any => {
       if (!this.background.initialized) {
-        try {
-          await tmpInitializedPromise;
-        } catch (error) {
-          this.debug(`[event-listeners] call to ${target.join('.')} timed out after ${options.timeout}s`);
-          throw error;
+        if (options.failOpenWhileInitializing) {
+          // A blocking webRequest listener must never hold a navigation while
+          // the extension is still restoring storage/tabs/add-on state.
+          // Returning synchronously also avoids Gecko suspending the channel
+          // for an unresolved Promise during cold start / Android resume.
+          this.debug(`[event-listeners] ${target} received before initialization; allowing request`);
+          return;
         }
+
+        return tmpInitializedPromise
+          .then(() => context[target].call(context, ...listenerArgs))
+          .catch(error => {
+            this.debug(`[event-listeners] call to ${target} timed out after ${options.timeout}s`);
+            throw error;
+          });
       }
 
       return context[target].call(context, ...listenerArgs);
