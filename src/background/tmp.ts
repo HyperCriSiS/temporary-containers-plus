@@ -59,15 +59,29 @@ export class TemporaryContainers {
   public permissions!: Permissions;
   public pref!: PreferencesSchema;
 
+  private async measureInitializationStage<T>(stage: string, operation: () => Promise<T>): Promise<T> {
+    const startedAt = Date.now();
+    this.debug(`[tmp:init] ${stage} started`);
+    try {
+      const result = await operation();
+      this.debug(`[tmp:init] ${stage} finished in ${Date.now() - startedAt}ms`);
+      return result;
+    } catch (error) {
+      this.debug(`[tmp:init] ${stage} failed after ${Date.now() - startedAt}ms`, error);
+      throw error;
+    }
+  }
+
   async initialize(): Promise<TemporaryContainers> {
     if (this.initialized) {
       throw new Error('already initialized');
     }
 
+    const initializationStartedAt = Date.now();
     this.debug('[tmp] initializing');
     browser.browserAction.disable();
     this.version = browser.runtime.getManifest().version;
-    const { permissions } = await browser.permissions.getAll();
+    const { permissions } = await this.measureInitializationStage('permissions.getAll', () => browser.permissions.getAll());
     if (!permissions) {
       throw new Error('permissions.getAll() failed');
     }
@@ -80,7 +94,7 @@ export class TemporaryContainers {
     };
 
     this.preferences.initialize();
-    await this.storage.initialize();
+    await this.measureInitializationStage('storage.initialize', () => this.storage.initialize());
 
     this.pref = new Proxy(this.storage, {
       get(target, key): any {
@@ -93,19 +107,19 @@ export class TemporaryContainers {
       if (this.pref.containerPrefixOverride) {
         this.storage.local.containerPrefix = this.pref.containerPrefixOverride;
       } else {
-        const browserInfo = await browser.runtime.getBrowserInfo();
+        const browserInfo = await this.measureInitializationStage('runtime.getBrowserInfo', () => browser.runtime.getBrowserInfo());
         this.storage.local.containerPrefix = browserInfo.name.toLowerCase();
       }
-      await this.storage.persist();
+      await this.measureInitializationStage('storage.persist container prefix', () => this.storage.persist());
     } else if (this.pref.containerPrefixOverride && this.storage.local.containerPrefix !== this.pref.containerPrefixOverride) {
       // User has changed the override, update containerPrefix
       this.storage.local.containerPrefix = this.pref.containerPrefixOverride;
-      await this.storage.persist();
+      await this.measureInitializationStage('storage.persist container prefix', () => this.storage.persist());
     } else if (!this.pref.containerPrefixOverride && typeof this.storage.local.containerPrefix === 'string') {
       // Override was cleared, reset to auto-detected value
-      const browserInfo = await browser.runtime.getBrowserInfo();
+      const browserInfo = await this.measureInitializationStage('runtime.getBrowserInfo', () => browser.runtime.getBrowserInfo());
       this.storage.local.containerPrefix = browserInfo.name.toLowerCase();
-      await this.storage.persist();
+      await this.measureInitializationStage('storage.persist container prefix', () => this.storage.persist());
     }
     this.containerPrefix = this.storage.local.containerPrefix;
 
@@ -126,15 +140,15 @@ export class TemporaryContainers {
     this.cleanup.initialize();
     this.convert.initialize();
 
-    await this.tabs.initialize();
-    await this.management.initialize();
+    await this.measureInitializationStage('tabs.initialize', () => this.tabs.initialize());
+    await this.measureInitializationStage('management.initialize', () => this.management.initialize());
 
-    this.debug('[tmp] initialized');
+    this.debug(`[tmp] initialized in ${Date.now() - initializationStartedAt}ms`);
     this.initialized = true;
     this.eventlisteners.tmpInitialized();
     browser.browserAction.enable();
 
-    await this.tabs.handleAlreadyOpen();
+    await this.measureInitializationStage('tabs.handleAlreadyOpen', () => this.tabs.handleAlreadyOpen());
 
     return this;
   }
