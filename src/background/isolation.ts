@@ -243,64 +243,79 @@ export class Isolation {
         relatedTabIds.push(openerTab.id);
       }
 
-      if (isolatedClick.tabId !== null && !relatedTabIds.includes(isolatedClick.tabId)) {
+      let matchesSourceTab = relatedTabIds.includes(isolatedClick.tab.id);
+      if (!matchesSourceTab && request.originUrl) {
+        if (this.urlsMatchIgnoringHash(request.originUrl, isolatedClick.tab.url)) {
+          matchesSourceTab = true;
+          this.debug(
+            '[shouldIsolateMouseClick] accepting originUrl match despite opener mismatch',
+            request.originUrl,
+            isolatedClick.tab.url
+          );
+        }
+      }
+
+      if (!matchesSourceTab) {
         this.debug(
-          '[shouldIsolateMouseClick] isolated click came from unrelated tab, ignoring',
-          isolatedClick,
-          relatedTabIds,
+          '[shouldIsolateMouseClick] not isolating mouse click because tab/openerTab id is different',
+          request,
           tab,
           openerTab,
-          request
+          isolatedClick.tab
         );
         return false;
       }
     }
 
-    if (isolatedClick.action === 'always') {
-      this.debug('[shouldIsolateMouseClick] isolated click action is always', request, tab);
+    this.debug('[beforeHandleRequest] decreasing isolated mouseclick count', isolatedClick);
+    isolatedClick.count--;
+
+    if (isolatedClick.count < 0) {
+      this.debug('[shouldIsolateMouseClick] not isolating and removing isolated mouseclick because its count is < 0', isolatedClick);
+      isolatedClick.abortController.abort();
+      delete this.mouseclick.isolated[request.url];
+      return false;
+    }
+
+    const isolate: { deletesHistory?: boolean; reload?: boolean } = {};
+    const clickType = isolatedClick.clickType;
+    if (this.pref.isolation.global.mouseClick[clickType].container === 'deleteshistory') {
+      isolate.deletesHistory = true;
+    }
+
+    if (tab && clickType === 'left' && isolatedClick.tab.id !== tab.id) {
+      isolate.reload = true;
+    }
+
+    if (!isolatedClick.count) {
+      this.debug('[shouldIsolateMouseClick] removing isolated mouseclick because its count is 0', isolatedClick);
+      isolatedClick.abortController.abort();
+      delete this.mouseclick.isolated[request.url];
+    }
+
+    this.debug('[shouldIsolateMouseClick] decided to isolate mouseclick', isolatedClick);
+
+    return isolate;
+  }
+
+  private urlsMatchIgnoringHash(urlA?: string, urlB?: string): boolean {
+    if (!urlA || !urlB) {
+      return false;
+    }
+
+    if (urlA === urlB) {
       return true;
     }
 
-    if (isolatedClick.action === 'never') {
-      this.debug('[shouldIsolateMouseClick] isolated click action is never', request, tab);
-      return false;
+    try {
+      const parsedA = new URL(urlA);
+      const parsedB = new URL(urlB);
+      parsedA.hash = '';
+      parsedB.hash = '';
+      return parsedA.href === parsedB.href;
+    } catch (_error) {
+      return urlA === urlB;
     }
-
-    if (isolatedClick.action === 'differentFromTabDomain') {
-      if (!tab || !/^https?:/.test(tab.url)) {
-        return true;
-      }
-      const tabUrl = new URL(tab.url);
-      const requestUrl = new URL(request.url);
-      return tabUrl.hostname !== requestUrl.hostname;
-    }
-
-    if (isolatedClick.action === 'differentFromTabDomainAndSubDomain') {
-      if (!tab || !/^https?:/.test(tab.url)) {
-        return true;
-      }
-      const tabUrl = new URL(tab.url);
-      const requestUrl = new URL(request.url);
-      return this.utils.getDomain(tabUrl.hostname) !== this.utils.getDomain(requestUrl.hostname);
-    }
-
-    return false;
-  }
-
-  shouldIsolateMac({ tab, macAssignment }: { tab?: Tab; macAssignment?: MacAssignment }): boolean | Record<string, unknown> {
-    if (!macAssignment || !tab) {
-      return false;
-    }
-    if (macAssignment.neverAsk) {
-      return false;
-    }
-    if (tab.cookieStoreId === macAssignment.cookieStoreId) {
-      return false;
-    }
-    if (this.mac.containerConfirmed[tab.id] && tab.cookieStoreId === this.mac.containerConfirmed[tab.id]) {
-      return false;
-    }
-    return true;
   }
 
   async shouldIsolateNavigation({
@@ -308,31 +323,147 @@ export class Isolation {
     tab,
     openerTab,
   }: {
-    request: WebRequestOnBeforeRequestDetails;
     tab?: Tab;
+    request: WebRequestOnBeforeRequestDetails;
     openerTab?: Tab;
-  }): Promise<boolean | Record<string, unknown>> {
-    if (this.pref.isolation.navigation.action === 'never') {
+  }): Promise<boolean> {
+    if (!tab || !tab.url) {
+      this.debug('[shouldIsolateNavigation] we cant proceed without tab url information', tab, request);
       return false;
     }
 
-    const target = await this.getNavigationTarget({ request, tab, openerTab });
-    if (!target) {
+    if ((tab.url === 'about:blank' || tab.url === 'about:newtab' || tab.url === 'about:home') && !openerTab) {
+      this.debug('[shouldIsolateNavigation] not isolating because the tab url is blank/newtab/home and no openerTab');
       return false;
     }
 
-    const action = await this.getIsolationAction({
-      request,
-      tab,
-      openerTab,
-      target,
-      preference: this.pref.isolation.navigation.action,
-    });
-    if (!action) {
+    if (
+      openerTab &&
+      tab.url === 'about:blank' &&
+      this.container.isPermanent(tab.cookieStoreId) &&
+      openerTab.cookieStoreId !== tab.cookieStoreId
+    ) {
+      this.debug(
+        '[shouldIsolateNavigation] the tab loads a permanent container that is different from the openerTab, probaby explicitly selected in the context menu'
+      );
       return false;
     }
 
-    return this.getIsolationResult(action);
+    const url =
+      this.request.lastSeenRequestUrl[request.requestId] && this.request.lastSeenRequestUrl[request.requestId] !== tab.url
+        ? this.request.lastSeenRequestUrl[request.requestId]
+        : (tab.url === 'about:blank' && openerTab && openerTab.url.startsWith('http') && openerTab.url) || tab.url;
+    const parsedURL = url.startsWith('about:') || url.startsWith('moz-extension:') ? url : new URL(url).hostname;
+    const parsedRequestURL = new URL(request.url);
+    const isTemporaryTab = !!(tab && this.container.isTemporary(tab.cookieStoreId));
+    const tabHostname =
+      typeof parsedURL === 'string' && !parsedURL.startsWith('about:') && !parsedURL.startsWith('moz-extension:') ? parsedURL : null;
+
+    const shouldSkipSameDomainPostInTemporaryTab = (): boolean => {
+      if (!isTemporaryTab || request.method !== 'POST' || !tabHostname) {
+        return false;
+      }
+
+      return parsedRequestURL.hostname === tabHostname;
+    };
+
+    for (const patternPreferences of this.pref.isolation.domain) {
+      const domainPattern = patternPreferences.pattern;
+
+      if (
+        !this.utils.matchDomainPattern(
+          (tab.url === 'about:blank' && openerTab && openerTab.url.startsWith('http') && openerTab.url) || tab.url,
+          domainPattern
+        )
+      ) {
+        continue;
+      }
+      if (patternPreferences.excluded && patternPreferences.excluded.length) {
+        for (const excludedDomainPattern of patternPreferences.excluded) {
+          if (!this.utils.matchDomainPattern(request.url, excludedDomainPattern)) {
+            continue;
+          }
+          this.debug('[shouldIsolateNavigation] not isolating because excluded domain pattern matches', request.url, excludedDomainPattern);
+          return false;
+        }
+      }
+
+      if (patternPreferences.navigation) {
+        const navigationPreferences = patternPreferences.navigation;
+        this.debug('[shouldIsolateNavigation] found pattern', domainPattern, navigationPreferences);
+
+        if (navigationPreferences.action === 'global') {
+          this.debug('[shouldIsolateNavigation] breaking because "global"');
+          break;
+        }
+
+        if (navigationPreferences.action === 'always') {
+          if (shouldSkipSameDomainPostInTemporaryTab()) {
+            this.debug(
+              '[shouldIsolateNavigation] not isolating same-domain POST in temporary container for domain pattern with "always" navigation',
+              domainPattern,
+              tab?.url,
+              request.url
+            );
+            return false;
+          }
+
+          if (request.originUrl && request.originUrl.startsWith('moz-extension://') && isTemporaryTab) {
+            const requestHostname = parsedRequestURL.hostname;
+
+            if (tabHostname === requestHostname || tab?.url === 'about:blank') {
+              this.debug(
+                '[shouldIsolateNavigation] not isolating because request originates from extension and tab is already in temporary container for domain pattern',
+                domainPattern,
+                tab?.url,
+                request.url
+              );
+              return false;
+            }
+          }
+        }
+
+        return await this.checkIsolationPreferenceAgainstUrl(navigationPreferences.action, parsedURL, parsedRequestURL.hostname);
+      }
+    }
+
+    // Before applying global navigation isolation, check if we're already in a temporary container
+    // and this is an extension-originated request to prevent infinite reload loops
+    const globalAction = this.pref.isolation.global.navigation.action;
+    if (globalAction === 'always' && isTemporaryTab) {
+      if (shouldSkipSameDomainPostInTemporaryTab()) {
+        this.debug(
+          '[shouldIsolateNavigation] not isolating same-domain POST in temporary container while global "always" navigation is active',
+          tab?.url,
+          request.url
+        );
+        return false;
+      }
+
+      // If the request originates from the extension (tab creation), check if we're navigating to same domain
+      if (request.originUrl && request.originUrl.startsWith('moz-extension://')) {
+        // Tab URL might still be about:blank or might already be the target URL
+        // Check if the request URL matches the same domain to avoid re-isolation
+        const requestHostname = parsedRequestURL.hostname;
+
+        if (tabHostname === requestHostname || tab?.url === 'about:blank') {
+          this.debug(
+            '[shouldIsolateNavigation] not isolating because request originates from extension and tab is already in temporary container',
+            tab?.url,
+            request.url,
+            request.originUrl
+          );
+          return false;
+        }
+      }
+    }
+
+    if (await this.checkIsolationPreferenceAgainstUrl(globalAction, parsedURL, parsedRequestURL.hostname)) {
+      return true;
+    }
+
+    this.debug('[shouldIsolateNavigation] not isolating');
+    return false;
   }
 
   async shouldIsolateAlways({
@@ -340,163 +471,177 @@ export class Isolation {
     tab,
     openerTab,
   }: {
-    request: WebRequestOnBeforeRequestDetails;
     tab?: Tab;
+    request: WebRequestOnBeforeRequestDetails;
     openerTab?: Tab;
   }): Promise<boolean | Record<string, unknown>> {
-    if (this.pref.isolation.global.action === 'never') {
+    if (!tab || !tab.url) {
+      this.debug('[shouldIsolateAlways] we cant proceed without tab url information', tab, request);
       return false;
     }
 
-    const action = await this.getIsolationAction({
-      request,
-      tab,
-      openerTab,
-      target: request.url,
-      preference: this.pref.isolation.global.action,
-    });
-    if (!action) {
-      return false;
-    }
-
-    return this.getIsolationResult(action);
-  }
-
-  async getNavigationTarget({
-    request,
-    tab,
-    openerTab,
-  }: {
-    request: WebRequestOnBeforeRequestDetails;
-    tab?: Tab;
-    openerTab?: Tab;
-  }): Promise<string | false> {
-    if (request.originUrl) {
-      return request.originUrl;
-    }
-    if (openerTab && /^https?:/.test(openerTab.url)) {
-      return openerTab.url;
-    }
-    if (tab && /^https?:/.test(tab.url)) {
-      return tab.url;
-    }
-    return false;
-  }
-
-  async getIsolationAction({
-    request,
-    tab,
-    openerTab,
-    target,
-    preference,
-  }: {
-    request: WebRequestOnBeforeRequestDetails;
-    tab?: Tab;
-    openerTab?: Tab;
-    target: string;
-    preference: IsolationAction;
-  }): Promise<IsolationAction | false> {
-    if (preference === 'never') {
-      return false;
-    }
-
-    if (preference === 'always') {
-      return 'always';
-    }
-
-    const requestUrl = new URL(request.url);
-    const targetUrl = new URL(target);
-
-    if (preference === 'differentFromDomain') {
-      return requestUrl.hostname !== targetUrl.hostname ? preference : false;
-    }
-
-    if (preference === 'differentFromDomainAndSubDomain') {
-      return this.utils.getDomain(requestUrl.hostname) !== this.utils.getDomain(targetUrl.hostname) ? preference : false;
-    }
-
-    if (preference === 'differentFromContainer') {
-      if (!tab) {
-        return preference;
+    for (const patternPreferences of this.pref.isolation.domain) {
+      const domainPattern = patternPreferences.pattern;
+      if (!this.utils.matchDomainPattern(request.url, domainPattern)) {
+        continue;
       }
-      if (tab.cookieStoreId === `${this.background.containerPrefix}-default`) {
-        return preference;
+      if (!patternPreferences.always) {
+        continue;
       }
-      if (this.container.isPermanent(tab.cookieStoreId)) {
+
+      const preferences = patternPreferences.always;
+      this.debug('[shouldIsolateAlways] found pattern for incoming request url', domainPattern, preferences);
+      if (preferences.action === 'disabled') {
+        this.debug('[shouldIsolateAlways] not isolating because "always" disabled');
+        continue;
+      }
+
+      if (preferences.allowedInPermanent && this.container.isPermanent(tab.cookieStoreId)) {
+        this.debug('[shouldIsolateAlways] not isolating because disabled in permanent container');
+        continue;
+      }
+
+      const isTemporary = this.container.isTemporary(tab.cookieStoreId);
+      if (!isTemporary) {
+        this.debug('[shouldIsolateAlways] isolating because not in a tmp container');
+        if (this.pref.deletesHistory.containerAlwaysPerDomain === 'automatic') {
+          return { deletesHistory: true };
+        }
+        return true;
+      }
+
+      if (preferences.allowedInTemporary && isTemporary) {
+        this.debug('[shouldIsolateAlways] not isolating because disabled in tmp container');
         return false;
       }
-      return preference;
-    }
 
-    if (preference === 'differentFromTabDomain') {
-      if (!tab || !/^https?:/.test(tab.url)) {
-        return preference;
+      // Check if the current tab URL also matches the same pattern
+      // This prevents infinite reloads when navigating within the same domain that has "Always Isolate" enabled
+      const tabUrlMatchesPattern = this.utils.matchDomainPattern(tab.url, domainPattern);
+      const requestUrlMatchesPattern = this.utils.matchDomainPattern(request.url, domainPattern);
+
+      if (isTemporary && tabUrlMatchesPattern && requestUrlMatchesPattern) {
+        this.debug(
+          '[shouldIsolateAlways] not isolating because already in temporary container and both tab and request match the same always pattern',
+          tab.url,
+          request.url,
+          domainPattern
+        );
+        return false;
       }
-      const tabUrl = new URL(tab.url);
-      return requestUrl.hostname !== tabUrl.hostname ? preference : false;
-    }
 
-    if (preference === 'differentFromTabDomainAndSubDomain') {
-      if (!tab || !/^https?:/.test(tab.url)) {
-        return preference;
+      if (!tabUrlMatchesPattern) {
+        let openerMatches = false;
+        if (openerTab && openerTab.url.startsWith('http') && this.utils.matchDomainPattern(openerTab.url, domainPattern)) {
+          openerMatches = true;
+          this.debug('[shouldIsolateAlways] opener tab url matched the pattern', openerTab.url, domainPattern);
+        }
+        if (!openerMatches) {
+          this.debug(
+            '[shouldIsolateAlways] isolating because the tab/opener url doesnt match the pattern',
+            tab.url,
+            openerTab,
+            domainPattern
+          );
+          return true;
+        }
       }
-      const tabUrl = new URL(tab.url);
-      return this.utils.getDomain(requestUrl.hostname) !== this.utils.getDomain(tabUrl.hostname) ? preference : false;
     }
-
-    this.debug('[getIsolationAction] unknown preference', preference, request, tab, openerTab);
     return false;
   }
 
-  getIsolationResult(action: IsolationAction): Record<string, unknown> {
-    if (action === 'always') {
-      return {};
+  shouldIsolateMac({ tab, macAssignment }: { tab?: Tab; macAssignment?: MacAssignment }): boolean {
+    if (this.pref.isolation.mac.action === 'disabled') {
+      this.debug('[shouldIsolateMac] mac isolation disabled');
+      return false;
     }
-
-    if (action === 'differentFromDomain' || action === 'differentFromDomainAndSubDomain') {
-      return {
-        reload: true,
-      };
+    if (tab && !this.container.isPermanent(tab.cookieStoreId)) {
+      this.debug('[shouldIsolateMac] we are not in a permanent container');
+      return false;
     }
-
-    if (action === 'differentFromContainer' || action === 'differentFromTabDomain' || action === 'differentFromTabDomainAndSubDomain') {
-      return {};
+    if (!macAssignment || (macAssignment && tab && tab.cookieStoreId !== macAssignment.cookieStoreId)) {
+      this.debug('[shouldIsolateMac] mac isolating because request url is not assigned to the tabs container');
+      return true;
     }
+    this.debug('[shouldIsolateMac] no mac isolation', tab, macAssignment);
+    return false;
+  }
 
-    return {};
+  async checkIsolationPreferenceAgainstUrl(preference: IsolationAction, origin: string, target: string): Promise<boolean> {
+    this.debug('[checkIsolationPreferenceAgainstUrl]', preference, origin, target);
+    switch (preference) {
+      case 'always':
+        this.debug('[checkIsolationPreferenceAgainstUrl] isolating based on "always"');
+        return true;
+
+      case 'notsamedomainexact':
+        if (target !== origin) {
+          this.debug('[checkIsolationPreferenceAgainstUrl] isolating based on "notsamedomainexact"');
+          return true;
+        }
+        break;
+
+      case 'notsamedomain':
+        if (!this.utils.sameDomain(origin, target)) {
+          this.debug('[checkIsolationPreferenceAgainstUrl] isolating based on "notsamedomain"');
+          return true;
+        }
+        break;
+    }
+    return false;
   }
 
   getActiveState(): boolean {
-    if (this.storage.local.isolation.reactivateTargetTime && this.storage.local.isolation.reactivateTargetTime < new Date().getTime()) {
-      this.setActiveState(true);
-    }
     return this.storage.local.isolation.active;
   }
 
   setActiveState(active: boolean): void {
+    this.debug('[setActiveState] isolation', active);
     this.storage.local.isolation.active = active;
     this.storage.persist();
-    this.browseraction.setIsolationState(active);
-    this.pageaction.setIsolationState(active);
+    if (active) {
+      this.browseraction.removeIsolationInactiveBadge();
+      this.reactivateStopInterval();
+    } else {
+      this.browseraction.addIsolationInactiveBadge();
+      this.reactivateStartInterval();
+    }
+    this.pageaction.showOrHide();
   }
 
-  async toggleActiveState(): Promise<void> {
+  toggleActiveState(): void {
     this.setActiveState(!this.getActiveState());
   }
 
-  async reactivateLater(): Promise<void> {
+  reactivateCheckTarget(): void {
+    const diff: number = Math.round((this.storage.local.isolation.reactivateTargetTime - new Date().getTime()) / 1000);
+    if (diff <= 0) {
+      this.reactivateStopInterval();
+      this.setActiveState(true);
+    } else if (diff <= 30 || diff % 10 == 0) {
+      this.browseraction.addIsolationInactiveBadge(diff);
+    }
+  }
+
+  reactivateStartInterval(): void {
+    if (this.pref.isolation.reactivateDelay > 0) {
+      this.debug('[reactivateStartInterval] isolation', this.storage.local.isolation);
+      this.reactivateStopInterval();
+      const reactivateTargetTime: number = this.storage.local.isolation.reactivateTargetTime;
+      this.storage.local.isolation.reactivateTargetTime = reactivateTargetTime
+        ? reactivateTargetTime
+        : new Date().getTime() + this.pref.isolation.reactivateDelay * 1000;
+      this.reactivateInterval = window.setInterval(() => {
+        this.reactivateCheckTarget();
+      }, 1000);
+    }
+  }
+
+  reactivateStopInterval(): void {
     if (this.reactivateInterval) {
       window.clearInterval(this.reactivateInterval);
+      this.reactivateInterval = 0;
     }
-    const target = new Date().getTime() + this.pref.isolation.reactivateLater * 60 * 1000;
-    this.storage.local.isolation.reactivateTargetTime = target;
-    this.storage.persist();
-    this.setActiveState(false);
-    this.reactivateInterval = window.setInterval(() => {
-      if (this.storage.local.isolation.reactivateTargetTime && this.storage.local.isolation.reactivateTargetTime < new Date().getTime()) {
-        window.clearInterval(this.reactivateInterval);
-        this.setActiveState(true);
-      }
-    }, 1000);
+    this.storage.local.isolation.reactivateTargetTime = 0;
   }
 }
