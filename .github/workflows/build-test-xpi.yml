@@ -1,0 +1,40 @@
+name: Build Test XPI
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-test-xpi:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Run linting
+        run: npm run lint
+
+      - name: Package unsigned XPI
+        run: npm run webext:build
+
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: temporary-containers-plus-test-xpi
+          path: web-ext-artifacts/*
+          if-no-files-found: error
+          retention-days: 14
