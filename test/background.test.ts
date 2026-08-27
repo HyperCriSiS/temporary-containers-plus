@@ -64,45 +64,46 @@ preferencesTestSet.map(preferences => {
     });
 
     describe('should catch early requests', () => {
-      it('allows main-frame requests immediately while tmp is still initializing', async () => {
+      it('allows blocking main-frame request stages synchronously while tmp is still initializing', async () => {
         const { tmp: background, browser } = await loadBackground({
           initialize: false,
           preferences,
         });
         const webRequestOnBeforeRequestStub = sinon.stub(background.request, 'webRequestOnBeforeRequest');
         const onBeforeSendHeadersStub = sinon.stub(background.cookies, 'maybeSetAndAddToHeader');
+        const beforeRequestListener = browser.webRequest.onBeforeRequest.addListener.firstCall.args[0];
+        const beforeSendHeadersListener = browser.webRequest.onBeforeSendHeaders.addListener.firstCall.args[0];
 
-        const createPromise = browser.tabs._create({ url: 'https://example.com' });
-        browser.webRequest.onBeforeSendHeaders.addListener.yield();
-        await nextTick();
+        const beforeRequestResult = beforeRequestListener({} as any);
+        const beforeSendHeadersResult = beforeSendHeadersListener({} as any);
 
+        expect(beforeRequestResult).to.equal(undefined);
+        expect(beforeSendHeadersResult).to.equal(undefined);
         webRequestOnBeforeRequestStub.should.not.have.been.called;
         onBeforeSendHeadersStub.should.not.have.been.called;
-        await createPromise;
       });
 
-      it('handles subsequent requests normally after initialization completes', async () => {
+      it('handles the same blocking request stages normally after initialization completes', async () => {
         const { tmp: background, browser } = await loadBackground({
           initialize: false,
           preferences,
         });
-
         const webRequestOnBeforeRequestStub = sinon.stub(background.request, 'webRequestOnBeforeRequest');
         const onBeforeSendHeadersStub = sinon.stub(background.cookies, 'maybeSetAndAddToHeader');
+        const beforeRequestListener = browser.webRequest.onBeforeRequest.addListener.firstCall.args[0];
+        const beforeSendHeadersListener = browser.webRequest.onBeforeSendHeaders.addListener.firstCall.args[0];
 
-        await browser.tabs._create({ url: 'https://example.com' });
-        browser.webRequest.onBeforeSendHeaders.addListener.yield();
+        beforeRequestListener({} as any);
+        beforeSendHeadersListener({} as any);
         webRequestOnBeforeRequestStub.should.not.have.been.called;
         onBeforeSendHeadersStub.should.not.have.been.called;
 
         await background.initialize();
-        webRequestOnBeforeRequestStub.resetHistory();
-        onBeforeSendHeadersStub.resetHistory();
 
-        await browser.tabs._create({ url: 'https://example.com' });
-        browser.webRequest.onBeforeSendHeaders.addListener.yield();
-        webRequestOnBeforeRequestStub.should.have.been.called;
-        onBeforeSendHeadersStub.should.have.been.called;
+        beforeRequestListener({} as any);
+        beforeSendHeadersListener({} as any);
+        webRequestOnBeforeRequestStub.should.have.been.calledOnce;
+        onBeforeSendHeadersStub.should.have.been.calledOnce;
       });
     });
 
