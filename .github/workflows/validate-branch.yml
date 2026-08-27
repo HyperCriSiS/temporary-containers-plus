@@ -32,13 +32,19 @@ jobs:
       - name: Run linting
         run: npm run lint
 
-      - name: Package unsigned XPI
-        run: npm run webext:build
+      - name: Package unsigned extension
+        run: |
+          npm run webext:build
+          for package in web-ext-artifacts/*.zip; do
+            cp "$package" "${package%.zip}.xpi"
+          done
 
       - name: Upload test package
         uses: actions/upload-artifact@v4
         with:
           name: temporary-containers-plus-test-xpi
-          path: web-ext-artifacts/*
+          path: |
+            web-ext-artifacts/*.zip
+            web-ext-artifacts/*.xpi
           if-no-files-found: error
           retention-days: 14
