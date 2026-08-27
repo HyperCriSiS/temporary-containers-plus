@@ -35,6 +35,7 @@ export class MultiAccountContainers {
   private pref!: PreferencesSchema;
   private storage!: Storage;
   private container!: Container;
+  private readonly assignmentTimeoutMs = 500;
 
   constructor(background: TemporaryContainers) {
     this.background = background;
@@ -182,9 +183,41 @@ export class MultiAccountContainers {
   }
 
   async getAssignment(url: string): Promise<MacAssignment> {
-    const assignment = await browser.runtime.sendMessage('@testpilot-containers', {
-      method: 'getAssignment',
-      url,
+    const assignment = await new Promise<any | undefined>(resolve => {
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.debug(
+          `[mac:getAssignment] Multi-Account Containers did not answer within ${this.assignmentTimeoutMs}ms; continuing without assignment`
+        );
+        resolve(undefined);
+      }, this.assignmentTimeoutMs);
+
+      browser.runtime
+        .sendMessage('@testpilot-containers', {
+          method: 'getAssignment',
+          url,
+        })
+        .then(response => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timeout);
+          resolve(response);
+        })
+        .catch(error => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timeout);
+          this.debug('[mac:getAssignment] contacting Multi-Account Containers failed', error);
+          resolve(undefined);
+        });
     });
 
     if (!assignment) {
