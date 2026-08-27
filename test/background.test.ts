@@ -70,11 +70,14 @@ preferencesTestSet.map(preferences => {
           preferences,
         });
         const webRequestOnBeforeRequestStub = sinon.stub(background.request, 'webRequestOnBeforeRequest');
+        const onBeforeSendHeadersStub = sinon.stub(background.cookies, 'maybeSetAndAddToHeader');
 
         const createPromise = browser.tabs._create({ url: 'https://example.com' });
+        browser.webRequest.onBeforeSendHeaders.addListener.yield();
         await nextTick();
 
         webRequestOnBeforeRequestStub.should.not.have.been.called;
+        onBeforeSendHeadersStub.should.not.have.been.called;
         await createPromise;
       });
 
@@ -85,15 +88,21 @@ preferencesTestSet.map(preferences => {
         });
 
         const webRequestOnBeforeRequestStub = sinon.stub(background.request, 'webRequestOnBeforeRequest');
+        const onBeforeSendHeadersStub = sinon.stub(background.cookies, 'maybeSetAndAddToHeader');
 
         await browser.tabs._create({ url: 'https://example.com' });
+        browser.webRequest.onBeforeSendHeaders.addListener.yield();
         webRequestOnBeforeRequestStub.should.not.have.been.called;
+        onBeforeSendHeadersStub.should.not.have.been.called;
 
         await background.initialize();
         webRequestOnBeforeRequestStub.resetHistory();
+        onBeforeSendHeadersStub.resetHistory();
 
         await browser.tabs._create({ url: 'https://example.com' });
+        browser.webRequest.onBeforeSendHeaders.addListener.yield();
         webRequestOnBeforeRequestStub.should.have.been.called;
+        onBeforeSendHeadersStub.should.have.been.called;
       });
     });
 
