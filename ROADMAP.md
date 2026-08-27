@@ -13,17 +13,22 @@ A Gecko network trace from Waterfox Android showed main-frame requests being sus
 - [x] Make `webRequest.onBeforeRequest` fail open while the extension is still initializing.
 - [x] Return synchronously in the fail-open path so Gecko does not suspend the channel for a Promise.
 - [x] Fix incorrect API reference used for the `browser.management.onInstalled` listener wrapper.
-- [ ] Add regression tests proving an early main-frame request returns immediately while initialization is pending.
-- [ ] Add timing/debug instrumentation for initialization stages (`permissions`, storage, tabs, management, already-open tabs).
+- [x] Make blocking `onBeforeSendHeaders` fail open during startup as well.
+- [x] Create initialization wait promises lazily so unused listeners cannot generate startup timeout rejections.
+- [x] Fix the misspelled Block Outside Container extension ID that prevented precedence detection.
+- [x] Add regression tests proving early `onBeforeRequest` and `onBeforeSendHeaders` handlers return immediately while initialization is pending.
+- [x] Add timing/debug instrumentation for initialization stages (`permissions`, storage, browser info/persist, tabs, management, already-open tabs).
 - [ ] Identify which initialization stage is slow or unreliable on GeckoView/Android.
 - [ ] Bound or eliminate other asynchronous work performed inside blocking `onBeforeRequest`.
-- [ ] Add explicit timeouts/fail-open behavior for cross-extension messaging (Containerise, Container Redirect, MAC integrations).
+- [x] Add explicit 500 ms fail-open timeouts for cross-extension messaging (Containerise, Container Redirect, Block Outside Container, Multi-Account Containers).
 
 ## Phase 2 — Android / GeckoView compatibility audit
 
 - [ ] Reproduce and catalogue errors shown in Waterfox Android's extension/debug console.
 - [ ] Audit every WebExtension API used by the background code against current Firefox Android/GeckoView support.
 - [ ] Guard optional/unsupported APIs instead of allowing startup or settings failures.
+  - [x] Guard optional event surfaces (`contextMenus.onShown`, management events, commands, browser action, window focus, webNavigation) during listener registration.
+  - [ ] Audit component initialization methods for optional API calls and rejected promises.
 - [ ] Audit `browserAction`, `contextMenus`, `commands`, `management`, `webNavigation`, contextual identities and external messaging behavior on Android.
 - [ ] Verify container creation/reload behavior for normal tabs, external links and custom tabs.
 - [ ] Verify cold start, warm resume, process recreation and browser update scenarios.
@@ -48,7 +53,7 @@ A Gecko network trace from Waterfox Android showed main-frame requests being sus
 
 ## Phase 5 — tests and release hardening
 
-- [ ] Add automated tests for startup-before-initialization requests.
+- [x] Add automated tests for startup-before-initialization requests.
 - [ ] Add tests for initialization timeout/failure recovery.
 - [ ] Add tests for external-addon non-response/timeouts.
 - [ ] Run TypeScript, ESLint, unit and functional test suites in CI.
@@ -58,7 +63,8 @@ A Gecko network trace from Waterfox Android showed main-frame requests being sus
 
 ## Immediate next work
 
-1. Add the startup regression test.
-2. Instrument `TemporaryContainers.initialize()` to identify slow Android stages.
-3. Audit `Request.handleRequest()` for unbounded awaits inside blocking `onBeforeRequest`.
-4. Reproduce the settings-page failures and fix unsupported API assumptions.
+1. Run the instrumented build on Waterfox Android and identify the slow initialization stage from `[tmp:init]` timings.
+2. Finish auditing `Request.handleRequest()` for remaining blocking awaits (`tabs.get`, contextual identities, isolation/reload path).
+3. Add regression tests for non-responsive external add-ons and verify the 500 ms fail-open behavior.
+4. Make the Options UI/background messaging usable even when full background initialization is incomplete or an optional API fails.
+5. Capture and fix the remaining Waterfox Android settings-console errors.
