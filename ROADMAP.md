@@ -20,7 +20,7 @@ A Gecko network trace from Waterfox Android showed main-frame requests being sus
 - [x] Add timing/debug instrumentation for initialization stages (`permissions`, storage, browser info/persist, tabs, management, already-open tabs).
 - [ ] Identify which initialization stage is slow or unreliable on GeckoView/Android.
 - [ ] Bound or eliminate other asynchronous work performed inside blocking `onBeforeRequest`.
-- [x] Add explicit 500 ms fail-open timeouts for cross-extension messaging (Containerise, Container Redirect, Block Outside Container, Multi-Account Containers).
+- [x] Add explicit 500 ms fail-open timeouts for cross-extension messaging (Containerise, Container Redirect, Block Outside Container, Multi-Account Containers, Tree Style Tab).
 
 ## Phase 2 — Android / GeckoView compatibility audit
 
@@ -55,16 +55,18 @@ A Gecko network trace from Waterfox Android showed main-frame requests being sus
 
 - [x] Add automated tests for startup-before-initialization requests.
 - [ ] Add tests for initialization timeout/failure recovery.
-- [ ] Add tests for external-addon non-response/timeouts.
-- [ ] Run TypeScript, ESLint, unit and functional test suites in CI.
+- [x] Add tests for external-addon non-response/timeouts (Containerise, Multi-Account Containers, Tree Style Tab).
+- [x] Run unit tests, TypeScript/build validation, ESLint and WebExtension lint in branch CI.
+- [ ] Add the functional/geckodriver suite to CI where it is reliable and cost-effective.
+- [x] Package every validated fix/feature branch build as a short-lived unsigned ZIP/XPI artifact.
 - [ ] Add a GeckoView/Firefox Android manual regression checklist.
-- [ ] Build a test XPI and validate on Waterfox Android before merging to `main`.
+- [ ] Validate the test XPI on Waterfox Android before merging to `main`.
 - [ ] Document deviations from upstream behavior and candidate changes suitable for upstream submission.
 
 ## Immediate next work
 
 1. Run the instrumented build on Waterfox Android and identify the slow initialization stage from `[tmp:init]` timings.
-2. Finish auditing `Request.handleRequest()` for remaining blocking awaits (`tabs.get`, contextual identities, isolation/reload path).
-3. Add regression tests for non-responsive external add-ons and verify the 500 ms fail-open behavior.
+2. Install the validated test XPI on Waterfox Android and capture `[tmp:init]` timings plus the remaining settings-console errors.
+3. Finish auditing `Request.handleRequest()` for remaining blocking awaits (`tabs.get`, contextual identities, isolation/reload path).
 4. Make the Options UI/background messaging usable even when full background initialization is incomplete or an optional API fails.
 5. Capture and fix the remaining Waterfox Android settings-console errors.
