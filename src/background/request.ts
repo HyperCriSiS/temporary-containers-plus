@@ -46,6 +46,7 @@ export class Request {
   private management!: Management;
   private history!: History;
   private utils!: Utils;
+  private readonly externalAddonMessageTimeoutMs = 500;
 
   constructor(background: TemporaryContainers) {
     this.background = background;
@@ -316,6 +317,42 @@ export class Request {
     }
   }
 
+  private async sendExternalAddonMessage<T>(extensionId: string, message: unknown, label: string): Promise<T | undefined> {
+    return new Promise(resolve => {
+      let settled = false;
+      const timeout = window.setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        this.debug(
+          `[handleRequest] ${label} did not answer within ${this.externalAddonMessageTimeoutMs}ms; continuing without precedence`
+        );
+        resolve(undefined);
+      }, this.externalAddonMessageTimeoutMs);
+
+      browser.runtime
+        .sendMessage(extensionId, message)
+        .then(response => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timeout);
+          resolve(response as T);
+        })
+        .catch(error => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          window.clearTimeout(timeout);
+          this.debug(`[handleRequest] contacting ${label} failed`, error);
+          resolve(undefined);
+        });
+    });
+  }
+
   async externalAddonHasPrecedence({
     request,
     tab,
@@ -329,10 +366,11 @@ export class Request {
 
     if (this.management.addons.get('containerise@kinte.sh')?.enabled) {
       try {
-        const hostmap = await browser.runtime.sendMessage('containerise@kinte.sh', {
-          method: 'getHostMap',
-          url: request.url,
-        });
+        const hostmap = await this.sendExternalAddonMessage<any>(
+          'containerise@kinte.sh',
+          { method: 'getHostMap', url: request.url },
+          'Containerise'
+        );
         if (typeof hostmap === 'object' && hostmap.cookieStoreId && hostmap.enabled) {
           this.debug('[handleRequest] assigned with containerise we do nothing', hostmap);
           return true;
@@ -340,16 +378,17 @@ export class Request {
           this.debug('[handleRequest] not assigned with containerise', hostmap);
         }
       } catch (error) {
-        this.debug('[handleRequest] contacting containerise failed, probably old version', error);
+        this.debug('[handleRequest] checking Containerise precedence failed', error);
       }
     }
 
     if (this.management.addons.get('{e70111b3-b362-47a7-bbdc-a6fb7249d47a}')?.enabled) {
       try {
-        const hostmap = await browser.runtime.sendMessage('{e70111b3-b362-47a7-bbdc-a6fb7249d47a}', {
-          method: 'getHostMap',
-          url: request.url,
-        });
+        const hostmap = await this.sendExternalAddonMessage<any>(
+          '{e70111b3-b362-47a7-bbdc-a6fb7249d47a}',
+          { method: 'getHostMap', url: request.url },
+          'Container Redirect'
+        );
         if (typeof hostmap === 'object' && hostmap.cookieStoreId && hostmap.enabled) {
           this.debug('[handleRequest] assigned with container-redirect we do nothing', hostmap);
           return true;
@@ -357,24 +396,25 @@ export class Request {
           this.debug('[handleRequest] not assigned with container-redirect', hostmap);
         }
       } catch (error) {
-        this.debug('[handleRequest] contacting container-redirect failed, probably old version', error);
+        this.debug('[handleRequest] checking Container Redirect precedence failed', error);
       }
     }
 
-    if (this.management.addons.get('block_outside_container@jspengun.org')?.enabled) {
+    if (this.management.addons.get('block_outside_container@jspenguin.org')?.enabled) {
       try {
-        const response = await browser.runtime.sendMessage('block_outside_container@jspenguin.org', {
-          action: 'rule_exists',
-          domain: parsedUrl.hostname,
-        });
-        if (response.rule_exists) {
+        const response = await this.sendExternalAddonMessage<{ rule_exists?: boolean }>(
+          'block_outside_container@jspenguin.org',
+          { action: 'rule_exists', domain: parsedUrl.hostname },
+          'Block Outside Container'
+        );
+        if (response?.rule_exists) {
           this.debug('[handleRequest] assigned with block_outside_container we do nothing');
           return true;
         } else {
           this.debug('[handleRequest] not assigned with block_outside_container');
         }
       } catch (error) {
-        this.debug('[handleRequest] contacting block_outside_container failed', error);
+        this.debug('[handleRequest] checking Block Outside Container precedence failed', error);
       }
     }
 
