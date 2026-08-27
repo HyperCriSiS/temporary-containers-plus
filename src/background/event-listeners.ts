@@ -35,7 +35,10 @@ export class EventListeners {
       ['blocking']
     );
     browser.webRequest.onBeforeSendHeaders.addListener(
-      this.wrap(browser.webRequest.onBeforeSendHeaders, this.background.cookies, 'maybeSetAndAddToHeader'),
+      this.wrap(browser.webRequest.onBeforeSendHeaders, this.background.cookies, 'maybeSetAndAddToHeader', {
+        timeout: 5,
+        failOpenWhileInitializing: true,
+      }),
       { urls: ['<all_urls>'], types: ['main_frame'] },
       ['blocking', 'requestHeaders']
     );
@@ -55,17 +58,17 @@ export class EventListeners {
       this.wrap(browser.webRequest.onErrorOccurred, this.background.request, 'cleanupCanceled'),
       { urls: ['<all_urls>'], types: ['main_frame'] }
     );
-    browser.browserAction.onClicked.addListener(this.wrap(browser.browserAction.onClicked, this.background.browseraction, 'onClicked'));
-    browser.contextMenus.onClicked.addListener(this.wrap(browser.contextMenus.onClicked, this.background.contextmenu, 'onClicked'));
-    browser.contextMenus.onShown.addListener(this.wrap(browser.contextMenus.onShown, this.background.contextmenu, 'onShown'));
-    browser.windows.onFocusChanged.addListener(
+    browser.browserAction?.onClicked?.addListener(this.wrap(browser.browserAction.onClicked, this.background.browseraction, 'onClicked'));
+    browser.contextMenus?.onClicked?.addListener(this.wrap(browser.contextMenus.onClicked, this.background.contextmenu, 'onClicked'));
+    browser.contextMenus?.onShown?.addListener(this.wrap(browser.contextMenus.onShown, this.background.contextmenu, 'onShown'));
+    browser.windows?.onFocusChanged?.addListener(
       this.wrap(browser.windows.onFocusChanged, this.background.contextmenu, 'windowsOnFocusChanged')
     );
-    browser.management.onDisabled.addListener(this.wrap(browser.management.onDisabled, this.background.management, 'disable'));
-    browser.management.onUninstalled.addListener(this.wrap(browser.management.onUninstalled, this.background.management, 'disable'));
-    browser.management.onEnabled.addListener(this.wrap(browser.management.onEnabled, this.background.management, 'enable'));
-    browser.management.onInstalled.addListener(this.wrap(browser.management.onInstalled, this.background.management, 'enable'));
-    browser.commands.onCommand.addListener(this.wrap(browser.commands.onCommand, this.background.commands, 'onCommand'));
+    browser.management?.onDisabled?.addListener(this.wrap(browser.management.onDisabled, this.background.management, 'disable'));
+    browser.management?.onUninstalled?.addListener(this.wrap(browser.management.onUninstalled, this.background.management, 'disable'));
+    browser.management?.onEnabled?.addListener(this.wrap(browser.management.onEnabled, this.background.management, 'enable'));
+    browser.management?.onInstalled?.addListener(this.wrap(browser.management.onInstalled, this.background.management, 'enable'));
+    browser.commands?.onCommand?.addListener(this.wrap(browser.commands.onCommand, this.background.commands, 'onCommand'));
     browser.tabs.onActivated.addListener(this.wrap(browser.tabs.onActivated, this.background.tabs, 'onActivated'));
     browser.tabs.onCreated.addListener(this.wrap(browser.tabs.onCreated, this.background.tabs, 'onCreated'));
     browser.tabs.onUpdated.addListener(this.wrap(browser.tabs.onUpdated, this.background.tabs, 'onUpdated'));
@@ -80,7 +83,7 @@ export class EventListeners {
   }
 
   registerPermissionedListener(): void {
-    browser.webNavigation?.onCommitted.addListener(this.wrap(browser.webNavigation?.onCommitted, this.background.scripts, 'maybeExecute'));
+    browser.webNavigation?.onCommitted?.addListener(this.wrap(browser.webNavigation.onCommitted, this.background.scripts, 'maybeExecute'));
   }
 
   wrap(
@@ -89,8 +92,6 @@ export class EventListeners {
     target: any,
     options: { timeout: number; failOpenWhileInitializing?: boolean } = { timeout: this.defaultTimeout }
   ): (...listenerArgs: any[]) => any {
-    const tmpInitializedPromise = this.createTmpInitializedPromise(options);
-
     const listener = (...listenerArgs: any[]): any => {
       if (!this.background.initialized) {
         if (options.failOpenWhileInitializing) {
@@ -102,7 +103,11 @@ export class EventListeners {
           return;
         }
 
-        return tmpInitializedPromise
+        // Create the wait lazily only when an event actually arrives before
+        // initialization. Creating timeout promises for every listener during
+        // registration caused unnecessary timers and could produce rejected
+        // promises even when no event was waiting.
+        return this.createTmpInitializedPromise(options)
           .then(() => context[target].call(context, ...listenerArgs))
           .catch(error => {
             this.debug(`[event-listeners] call to ${target} timed out after ${options.timeout}s`);
@@ -137,6 +142,7 @@ export class EventListeners {
       resolver.resolve();
       window.clearTimeout(resolver.timeout);
     });
+    this.tmpInitializedPromiseResolvers = [];
   };
 
   remove(): void {
